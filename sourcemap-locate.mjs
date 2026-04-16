@@ -51,15 +51,6 @@ function loadMap(jsPath, jsContent) {
   return { mapPath, mapJson: JSON.parse(raw) };
 }
 
-function getSourceLines(mapJson, sourcePath) {
-  const sources = mapJson.sources || [];
-  const idx = sources.indexOf(sourcePath);
-  if (idx >= 0 && mapJson.sourcesContent && mapJson.sourcesContent[idx] != null) {
-    return normalizeLines(mapJson.sourcesContent[idx]);
-  }
-  return null;
-}
-
 function normalizeLines(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
@@ -76,7 +67,7 @@ function tryReadSourceFromDisk(sourcePath, root) {
   return null;
 }
 
-function printContext({ sourcePath, line1, col0, lines }) {
+function printContext({ sourcePath, line1, col0, lines, contentOrigin }) {
   const CONTEXT = 3;
   const idx = line1 - 1;
   if (idx < 0 || idx >= lines.length) {
@@ -86,7 +77,12 @@ function printContext({ sourcePath, line1, col0, lines }) {
   const start = Math.max(0, idx - CONTEXT);
   const end = Math.min(lines.length - 1, idx + CONTEXT);
 
+  const originLabel =
+    contentOrigin === "inline"
+      ? "（源码来自 source map 内联 sourcesContent，非磁盘文件）"
+      : "（源码来自磁盘）";
   console.log(`源文件: ${sourcePath}`);
+  console.log(originLabel);
   console.log(`位置: 第 ${line1} 行, 第 ${col0 + 1} 列 (1-based 列)\n`);
 
   const width = String(end + 1).length;
@@ -107,7 +103,7 @@ function usage() {
 
   行、列: 均1-based（相对生成后的 .js 文件）
 
-  --root  当 source map 未内联 sourcesContent 时，用于拼接 assets/... 等相对路径读取 .ts`);
+  --root  仅当 map 未携带对应 sourcesContent 时，用于从磁盘读取 .ts`);
 }
 
 async function main() {
@@ -142,11 +138,19 @@ async function main() {
       process.exit(2);
     }
 
-    let lines = getSourceLines(mapJson, pos.source);
-    if (!lines) lines = tryReadSourceFromDisk(pos.source, root);
+    /** 只要 map 里有 sourcesContent，就用官方 API 取内联 TS，避免路径不一致时误读盘 */
+    const inline = consumer.sourceContentFor(pos.source, true);
+    let lines = null;
+    let contentOrigin = "disk";
+    if (inline != null && inline !== "") {
+      lines = normalizeLines(inline);
+      contentOrigin = "inline";
+    } else {
+      lines = tryReadSourceFromDisk(pos.source, root);
+    }
     if (!lines) {
       console.error(
-        `无法取得源码内容: ${pos.source}\n请传入 --root 指向含 assets/TypeScript 的工程根目录。`
+        `无法取得源码内容: ${pos.source}\n若 map 无内联内容，请传入 --root 指向含 assets/TypeScript 的工程根目录。`
       );
       process.exit(3);
     }
@@ -156,6 +160,7 @@ async function main() {
       line1: pos.line,
       col0: pos.column,
       lines,
+      contentOrigin,
     });
   } finally {
     consumer.destroy();
