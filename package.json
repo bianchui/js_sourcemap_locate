@@ -1,0 +1,9 @@
+{
+  "name": "sourcemap-locate",
+  "private": true,
+  "type": "module",
+  "main": "sourcemap-locate.mjs",
+  "dependencies": {
+    "source-map": "^0.7.4"
+  }
+}
