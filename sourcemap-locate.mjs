@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * 用法: node sourcemap-locate.mjs <生成.js路径> <行> <列> [--root <工程根目录>]
+ * 用法:
+ *   node sourcemap-locate.mjs <生成.js> <行> <列> [--root <工程根>]
+ *   node sourcemap-locate.mjs <生成.js>:<行>:<列>  [--root <工程根>]
  *
- * 行、列均为1-based（与编辑器/多数报错一致）。内部会转为 source-map 所需的 0-based 列。
- *
- * 示例:
- *   node sourcemap-locate.mjs index.js 100 42
- *   node sourcemap-locate.mjs ./bundle.js 10 1 --root /path/to/Client
+ * 行、列均为1-based。
+ * 特例：当行=1 且列超出第1行长度时，列被视为文件级字符偏移（0-based），
+ *       自动换算为实际 (行, 列) 再查 source map。
  */
 
 import { readFileSync, existsSync } from "node:fs";
@@ -17,16 +17,46 @@ import { SourceMapConsumer } from "source-map";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function parseArgs(argv) {
-  const args = { root: null, files: [] };
+  const args = { root: null, jsPath: null, line: null, col: null };
+  const positional = [];
   for (let i = 2; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--root" && argv[i + 1]) {
       args.root = resolve(argv[++i]);
     } else if (!a.startsWith("-")) {
-      args.files.push(a);
+      positional.push(a);
+    }
+  }
+
+  if (positional.length >= 3) {
+    // 传统格式: <js> <行> <列>
+    args.jsPath = positional[0];
+    args.line   = parseInt(positional[1], 10);
+    args.col    = parseInt(positional[2], 10);
+  } else if (positional.length >= 1) {
+    // 一体格式: <js>:<行>:<列>  （Mac 路径不含冒号，最后两段取数字即可）
+    const parts = positional[0].split(":");
+    if (parts.length >= 3) {
+      const col  = parseInt(parts[parts.length - 1], 10);
+      const line = parseInt(parts[parts.length - 2], 10);
+      if (Number.isFinite(line) && Number.isFinite(col)) {
+        args.jsPath = parts.slice(0, parts.length - 2).join(":");
+        args.line   = line;
+        args.col    = col;
+      }
     }
   }
   return args;
+}
+
+/**
+ * 将文件级字符偏移（0-based）转换为 1-based 行号 + 0-based 列号。
+ * 支持 \r\n / \r / \n 三种换行。
+ */
+function globalOffsetToLineCol(content, offset0) {
+  const before = content.slice(0, offset0);
+  const lines  = before.split(/\r\n|\r|\n/);
+  return { line: lines.length, col0: lines[lines.length - 1].length };
 }
 
 function extractSourceMappingURL(js) {
@@ -99,31 +129,44 @@ function printContext({ sourcePath, line1, col0, lines, contentOrigin }) {
 }
 
 function usage() {
-  console.error(`用法: node sourcemap-locate.mjs <生成.js> <行> <列> [--root <工程根>]
+  console.error(`用法:
+  node sourcemap-locate.mjs <生成.js> <行> <列> [--root <工程根>]
+  node sourcemap-locate.mjs <生成.js>:<行>:<列>  [--root <工程根>]
 
   行、列: 均1-based（相对生成后的 .js 文件）
+  特例:   行=1 且列超出第1行长度时，列视为文件级字符偏移量，自动换算。
 
   --root  仅当 map 未携带对应 sourcesContent 时，用于从磁盘读取 .ts`);
 }
 
 async function main() {
-  const { root, files } = parseArgs(process.argv);
-  if (files.length < 3) {
+  const { root, jsPath: rawJsPath, line: rawLine, col: rawCol } = parseArgs(process.argv);
+  if (!rawJsPath || !Number.isFinite(rawLine) || !Number.isFinite(rawCol)) {
     usage();
     process.exit(1);
   }
 
-  const jsPath = resolve(files[0]);
-  const genLine = parseInt(files[1], 10);
-  const genCol1 = parseInt(files[2], 10);
-
-  if (!Number.isFinite(genLine) || !Number.isFinite(genCol1) || genLine < 1 || genCol1 < 1) {
+  if (rawLine < 1 || rawCol < 1) {
     console.error("行、列须为 >=1 的整数");
     process.exit(1);
   }
 
-  const genCol0 = genCol1 - 1;
+  const jsPath    = resolve(rawJsPath);
   const jsContent = readFileSync(jsPath, "utf8");
+
+  // 当 line=1 且列号超出第1行长度时，将列号视为文件级字符偏移量
+  const jsLines   = jsContent.split(/\r\n|\r|\n/);
+  let genLine, genCol0;
+  if (rawLine === 1 && rawCol - 1 > jsLines[0].length) {
+    const converted = globalOffsetToLineCol(jsContent, rawCol - 1);
+    genLine  = converted.line;
+    genCol0  = converted.col0;
+    console.log(`[偏移模式] 字符偏移 ${rawCol - 1} → 第 ${genLine} 行, 第 ${genCol0 + 1} 列（JS 文件内）`);
+  } else {
+    genLine = rawLine;
+    genCol0 = rawCol - 1;
+  }
+
   const { mapJson } = loadMap(jsPath, jsContent);
 
   const consumer = await new SourceMapConsumer(mapJson);
